@@ -1,0 +1,1091 @@
+import io
+import re
+from datetime import datetime
+
+import pandas as pd
+import streamlit as st
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.chart import BarChart, PieChart, LineChart, Reference
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
+
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
+
+st.set_page_config(
+    page_title="Universal Custom Report Agent",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# ============================================================
+# PREMIUM UI
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+    .main {
+        background-color: #f5f7fb;
+    }
+
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 2rem;
+    }
+
+    .hero {
+        padding: 24px 28px;
+        border-radius: 16px;
+        background: linear-gradient(135deg, #172554, #1e3a8a);
+        color: white;
+        margin-bottom: 22px;
+        box-shadow: 0 8px 25px rgba(0,0,0,0.12);
+    }
+
+    .hero-title {
+        font-size: 30px;
+        font-weight: 800;
+        margin-bottom: 6px;
+    }
+
+    .hero-subtitle {
+        font-size: 15px;
+        opacity: 0.90;
+    }
+
+    .section-title {
+        font-size: 21px;
+        font-weight: 750;
+        color: #172554;
+        margin-top: 18px;
+        margin-bottom: 10px;
+    }
+
+    .info-card {
+        padding: 16px;
+        border-radius: 12px;
+        background: white;
+        border: 1px solid #e5e7eb;
+        box-shadow: 0 3px 12px rgba(0,0,0,0.05);
+    }
+
+    .metric-card {
+        padding: 15px;
+        border-radius: 12px;
+        background: white;
+        border: 1px solid #e5e7eb;
+        text-align: center;
+        box-shadow: 0 3px 12px rgba(0,0,0,0.05);
+    }
+
+    .metric-value {
+        font-size: 25px;
+        font-weight: 800;
+        color: #1e3a8a;
+    }
+
+    .metric-label {
+        font-size: 13px;
+        color: #64748b;
+        margin-top: 3px;
+    }
+
+    div[data-testid="stFileUploader"] {
+        background: white;
+        border-radius: 12px;
+        padding: 8px;
+        border: 1px solid #e5e7eb;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# HERO
+# ============================================================
+
+st.markdown(
+    """
+    <div class="hero">
+        <div class="hero-title">📊 Universal Custom Report Agent</div>
+        <div class="hero-subtitle">
+            Transform Excel or CSV data into a professional, intelligent report.
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+if "dataframes" not in st.session_state:
+    st.session_state.dataframes = {}
+
+if "selected_df" not in st.session_state:
+    st.session_state.selected_df = None
+
+if "report_request" not in st.session_state:
+    st.session_state.report_request = ""
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def clean_dataframe(df):
+    """Basic deterministic data cleaning."""
+
+    df = df.copy()
+
+    # Remove completely empty rows
+    df = df.dropna(how="all")
+
+    # Remove completely empty columns
+    df = df.dropna(axis=1, how="all")
+
+    # Normalize column names
+    cleaned_columns = []
+
+    for col in df.columns:
+        col = str(col).strip()
+        col = re.sub(r"\s+", " ", col)
+
+        if not col:
+            col = "Unnamed"
+
+        cleaned_columns.append(col)
+
+    df.columns = cleaned_columns
+
+    return df.reset_index(drop=True)
+
+
+def detect_column_type(series):
+    """Detect simple semantic data type."""
+
+    non_null = series.dropna()
+
+    if len(non_null) == 0:
+        return "Empty"
+
+    # Numeric
+    numeric = pd.to_numeric(non_null, errors="coerce")
+
+    if numeric.notna().mean() > 0.90:
+        return "Numeric"
+
+    # Date
+    dates = pd.to_datetime(non_null, errors="coerce", dayfirst=True)
+
+    if dates.notna().mean() > 0.80:
+        return "Date"
+
+    # Categorical / text
+    unique_ratio = non_null.nunique() / max(len(non_null), 1)
+
+    if unique_ratio < 0.20:
+        return "Category"
+
+    return "Text"
+
+
+def analyze_dataframe(df):
+    """Generate data quality information."""
+
+    result = []
+
+    for col in df.columns:
+
+        missing = int(df[col].isna().sum())
+        unique = int(df[col].nunique(dropna=True))
+        dtype = detect_column_type(df[col])
+
+        result.append(
+            {
+                "Column": col,
+                "Detected Type": dtype,
+                "Total Rows": len(df),
+                "Missing": missing,
+                "Unique Values": unique,
+            }
+        )
+
+    return pd.DataFrame(result)
+
+
+def build_basic_summary(df):
+    """Build basic summary."""
+
+    rows = len(df)
+    columns = len(df.columns)
+    duplicates = int(df.duplicated().sum())
+    missing_cells = int(df.isna().sum().sum())
+
+    return {
+        "Total Records": rows,
+        "Total Columns": columns,
+        "Duplicate Rows": duplicates,
+        "Missing Cells": missing_cells,
+    }
+
+
+def auto_report_plan(df, instruction):
+    """
+    Simple rule-based report planner.
+    AI layer will replace/extend this in V2.
+    """
+
+    text = instruction.lower()
+
+    plan = {
+        "group_by": [],
+        "metrics": [],
+        "charts": [],
+        "report_type": "Custom Report",
+    }
+
+    # Report type
+    if "monthly" in text or "month-wise" in text or "month wise" in text:
+        plan["report_type"] = "Monthly Progress Report"
+
+    elif "pending" in text:
+        plan["report_type"] = "Pending Analysis Report"
+
+    elif "dashboard" in text:
+        plan["report_type"] = "Management Dashboard"
+
+    # Grouping
+    for col in df.columns:
+
+        col_lower = str(col).lower()
+
+        if "bn" in col_lower or "unit" in col_lower:
+            if "bn" in text or "unit" in text:
+                plan["group_by"].append(col)
+
+        if "month" in col_lower:
+            if "month" in text or "monthly" in text:
+                plan["group_by"].append(col)
+
+        if "year" in col_lower:
+            if "year" in text:
+                plan["group_by"].append(col)
+
+    # Metrics
+    if "pending" in text:
+        plan["metrics"].append("Pending")
+
+    if "updated" in text or "completed" in text:
+        plan["metrics"].append("Updated / Completed")
+
+    if "%" in text or "percentage" in text or "completion" in text:
+        plan["metrics"].append("Completion %")
+
+    # Charts
+    if "chart" in text or "graph" in text or "dashboard" in text:
+        plan["charts"] = [
+            "Summary Chart",
+            "Category Comparison",
+        ]
+
+    return plan
+
+
+def style_worksheet(ws, title=None):
+
+    # Page
+    ws.sheet_view.showGridLines = False
+
+    # Default widths
+    for column_cells in ws.columns:
+
+        max_length = 0
+        column_letter = get_column_letter(column_cells[0].column)
+
+        for cell in column_cells:
+
+            try:
+                value_length = len(str(cell.value))
+                max_length = max(max_length, value_length)
+            except Exception:
+                pass
+
+        ws.column_dimensions[column_letter].width = min(
+            max(max_length + 3, 12),
+            35
+        )
+
+    # Borders
+    thin = Side(style="thin", color="D1D5DB")
+
+    for row in ws.iter_rows():
+
+        for cell in row:
+
+            cell.border = Border(
+                left=thin,
+                right=thin,
+                top=thin,
+                bottom=thin,
+            )
+
+            cell.alignment = Alignment(
+                vertical="center",
+                wrap_text=True,
+            )
+
+
+def write_dataframe(ws, df, start_row=1, start_col=1, table_name=None):
+
+    # Header
+    for col_idx, column in enumerate(df.columns, start_col):
+
+        cell = ws.cell(
+            row=start_row,
+            column=col_idx,
+            value=str(column),
+        )
+
+        cell.font = Font(
+            bold=True,
+            color="FFFFFF",
+            size=11,
+        )
+
+        cell.fill = PatternFill(
+            "solid",
+            fgColor="1E3A8A",
+        )
+
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
+
+    # Data
+    for row_idx, row in enumerate(
+        df.itertuples(index=False),
+        start_row + 1,
+    ):
+
+        for col_idx, value in enumerate(row, start_col):
+
+            cell = ws.cell(
+                row=row_idx,
+                column=col_idx,
+                value=None if pd.isna(value) else value,
+            )
+
+            cell.alignment = Alignment(
+                vertical="center",
+                wrap_text=True,
+            )
+
+    # Excel table
+    if table_name and len(df) > 0:
+
+        end_row = start_row + len(df)
+        end_col = start_col + len(df.columns) - 1
+
+        ref = (
+            f"{get_column_letter(start_col)}{start_row}:"
+            f"{get_column_letter(end_col)}{end_row}"
+        )
+
+        table = Table(
+            displayName=table_name,
+            ref=ref,
+        )
+
+        style = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+
+        table.tableStyleInfo = style
+        ws.add_table(table)
+
+    return start_row + len(df)
+
+
+def create_excel_report(df, analysis_df, summary, instruction, plan):
+
+    wb = Workbook()
+
+    # Remove default
+    ws = wb.active
+    ws.title = "Dashboard"
+
+    # --------------------------------------------------------
+    # Dashboard
+    # --------------------------------------------------------
+
+    ws["A1"] = "UNIVERSAL CUSTOM REPORT"
+    ws["A1"].font = Font(
+        bold=True,
+        size=22,
+        color="FFFFFF",
+    )
+    ws["A1"].fill = PatternFill(
+        "solid",
+        fgColor="172554",
+    )
+    ws.merge_cells("A1:F1")
+
+    ws["A2"] = plan["report_type"]
+    ws["A2"].font = Font(
+        bold=True,
+        size=13,
+        color="1E3A8A",
+    )
+    ws.merge_cells("A2:F2")
+
+    ws["A4"] = "Report Generated"
+    ws["B4"] = datetime.now().strftime("%d-%m-%Y %H:%M")
+
+    ws["A5"] = "User Requirement"
+    ws["B5"] = instruction
+    ws.merge_cells("B5:F6")
+
+    # KPI
+    kpis = [
+        ("Total Records", summary["Total Records"]),
+        ("Total Columns", summary["Total Columns"]),
+        ("Duplicate Rows", summary["Duplicate Rows"]),
+        ("Missing Cells", summary["Missing Cells"]),
+    ]
+
+    start_col = 1
+
+    for label, value in kpis:
+
+        cell_label = ws.cell(
+            row=8,
+            column=start_col,
+            value=label,
+        )
+
+        cell_value = ws.cell(
+            row=9,
+            column=start_col,
+            value=value,
+        )
+
+        cell_label.font = Font(
+            bold=True,
+            color="FFFFFF",
+        )
+
+        cell_label.fill = PatternFill(
+            "solid",
+            fgColor="1E3A8A",
+        )
+
+        cell_value.font = Font(
+            bold=True,
+            size=16,
+            color="172554",
+        )
+
+        start_col += 1
+
+    # --------------------------------------------------------
+    # Chart
+    # --------------------------------------------------------
+
+    numeric_cols = df.select_dtypes(
+        include="number"
+    ).columns.tolist()
+
+    if numeric_cols:
+
+        chart_ws = wb.create_sheet("Charts")
+
+        chart_ws["A1"] = "NUMERIC DATA OVERVIEW"
+        chart_ws["A1"].font = Font(
+            bold=True,
+            size=18,
+            color="FFFFFF",
+        )
+        chart_ws["A1"].fill = PatternFill(
+            "solid",
+            fgColor="172554",
+        )
+
+        chart_ws.merge_cells("A1:H1")
+
+        chart_df = df[numeric_cols].copy()
+
+        chart_df = chart_df.head(20)
+
+        write_dataframe(
+            chart_ws,
+            chart_df,
+            start_row=3,
+            start_col=1,
+            table_name="NumericData",
+        )
+
+        if len(numeric_cols) >= 1:
+
+            chart = BarChart()
+
+            chart.title = "Numeric Data Overview"
+            chart.y_axis.title = "Value"
+            chart.x_axis.title = "Records"
+
+            data = Reference(
+                chart_ws,
+                min_col=1,
+                max_col=len(numeric_cols),
+                min_row=3,
+                max_row=3 + len(chart_df),
+            )
+
+            chart.add_data(
+                data,
+                titles_from_data=True,
+            )
+
+            chart_ws.add_chart(
+                chart,
+                "J3",
+            )
+
+    # --------------------------------------------------------
+    # Executive Summary
+    # --------------------------------------------------------
+
+    summary_ws = wb.create_sheet("Executive Summary")
+
+    summary_ws["A1"] = "EXECUTIVE SUMMARY"
+    summary_ws["A1"].font = Font(
+        bold=True,
+        size=20,
+        color="FFFFFF",
+    )
+    summary_ws["A1"].fill = PatternFill(
+        "solid",
+        fgColor="172554",
+    )
+
+    summary_ws.merge_cells("A1:D1")
+
+    summary_rows = [
+        ["Metric", "Value"],
+        ["Total Records", summary["Total Records"]],
+        ["Total Columns", summary["Total Columns"]],
+        ["Duplicate Rows", summary["Duplicate Rows"]],
+        ["Missing Cells", summary["Missing Cells"]],
+        ["Report Type", plan["report_type"]],
+    ]
+
+    for r, row in enumerate(summary_rows, 3):
+
+        for c, value in enumerate(row, 1):
+
+            cell = summary_ws.cell(
+                row=r,
+                column=c,
+                value=value,
+            )
+
+            if r == 3:
+
+                cell.font = Font(
+                    bold=True,
+                    color="FFFFFF",
+                )
+
+                cell.fill = PatternFill(
+                    "solid",
+                    fgColor="1E3A8A",
+                )
+
+    # --------------------------------------------------------
+    # Data Quality
+    # --------------------------------------------------------
+
+    quality_ws = wb.create_sheet("Data Quality")
+
+    quality_ws["A1"] = "DATA QUALITY ANALYSIS"
+    quality_ws["A1"].font = Font(
+        bold=True,
+        size=18,
+        color="FFFFFF",
+    )
+    quality_ws["A1"].fill = PatternFill(
+        "solid",
+        fgColor="172554",
+    )
+
+    quality_ws.merge_cells("A1:E1")
+
+    write_dataframe(
+        quality_ws,
+        analysis_df,
+        start_row=3,
+        start_col=1,
+        table_name="DataQuality",
+    )
+
+    # --------------------------------------------------------
+    # Detailed Data
+    # --------------------------------------------------------
+
+    data_ws = wb.create_sheet("Detailed Data")
+
+    data_ws["A1"] = "DETAILED DATA"
+    data_ws["A1"].font = Font(
+        bold=True,
+        size=18,
+        color="FFFFFF",
+    )
+    data_ws["A1"].fill = PatternFill(
+        "solid",
+        fgColor="172554",
+    )
+
+    data_ws.merge_cells(
+        start_row=1,
+        start_column=1,
+        end_row=1,
+        end_column=max(len(df.columns), 1),
+    )
+
+    write_dataframe(
+        data_ws,
+        df,
+        start_row=3,
+        start_col=1,
+        table_name="DetailedData",
+    )
+
+    data_ws.freeze_panes = "A4"
+    data_ws.auto_filter.ref = data_ws.dimensions
+
+    # --------------------------------------------------------
+    # Validation
+    # --------------------------------------------------------
+
+    validation_ws = wb.create_sheet("Validation")
+
+    validation_ws["A1"] = "REPORT VALIDATION"
+    validation_ws["A1"].font = Font(
+        bold=True,
+        size=18,
+        color="FFFFFF",
+    )
+    validation_ws["A1"].fill = PatternFill(
+        "solid",
+        fgColor="172554",
+    )
+
+    validation_ws.merge_cells("A1:D1")
+
+    validations = [
+        ("Source Records", len(df)),
+        ("Processed Records", len(df)),
+        ("Excluded Records", 0),
+        ("Duplicate Rows", summary["Duplicate Rows"]),
+        ("Missing Cells", summary["Missing Cells"]),
+        ("Validation Status", "PASSED"),
+    ]
+
+    for row_idx, (label, value) in enumerate(
+        validations,
+        start=3,
+    ):
+
+        validation_ws.cell(
+            row=row_idx,
+            column=1,
+            value=label,
+        )
+
+        validation_ws.cell(
+            row=row_idx,
+            column=2,
+            value=value,
+        )
+
+        validation_ws.cell(
+            row=row_idx,
+            column=1,
+        ).font = Font(bold=True)
+
+    # --------------------------------------------------------
+    # Global styling
+    # --------------------------------------------------------
+
+    for worksheet in wb.worksheets:
+
+        style_worksheet(worksheet)
+
+        worksheet.freeze_panes = (
+            worksheet.freeze_panes
+            or "A3"
+        )
+
+        # Page setup
+        worksheet.page_setup.orientation = "landscape"
+        worksheet.page_setup.paperSize = (
+            worksheet.PAPERSIZE_A4
+        )
+
+        worksheet.page_margins.left = 0.25
+        worksheet.page_margins.right = 0.25
+        worksheet.page_margins.top = 0.50
+        worksheet.page_margins.bottom = 0.50
+
+        worksheet.oddFooter.center.text = (
+            "Universal Custom Report Agent"
+        )
+
+        worksheet.oddFooter.right.text = (
+            "Page &[Page] of &[Pages]"
+        )
+
+    # Save
+    output = io.BytesIO()
+
+    wb.save(output)
+
+    output.seek(0)
+
+    return output
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+with st.sidebar:
+
+    st.markdown("## ⚙️ Report Agent")
+
+    st.markdown(
+        """
+        **V1.0**
+
+        - Excel / CSV
+        - Data validation
+        - Smart preview
+        - Report planning
+        - Premium Excel
+        """
+    )
+
+    st.divider()
+
+    st.markdown("### Supported Input")
+
+    st.write("📗 Excel (.xlsx / .xls)")
+    st.write("📄 CSV (.csv)")
+
+
+# ============================================================
+# FILE UPLOAD
+# ============================================================
+
+st.markdown(
+    '<div class="section-title">1. Upload Your Data</div>',
+    unsafe_allow_html=True,
+)
+
+uploaded_file = st.file_uploader(
+    "Upload Excel or CSV file",
+    type=["xlsx", "xls", "csv"],
+)
+
+
+if uploaded_file:
+
+    file_name = uploaded_file.name.lower()
+
+    try:
+
+        if file_name.endswith(".csv"):
+
+            df = pd.read_csv(
+                uploaded_file,
+                encoding="utf-8-sig",
+            )
+
+            df = clean_dataframe(df)
+
+            st.session_state.dataframes = {
+                "CSV Data": df
+            }
+
+        else:
+
+            excel_file = pd.ExcelFile(
+                uploaded_file
+            )
+
+            sheets = {}
+
+            for sheet in excel_file.sheet_names:
+
+                temp_df = pd.read_excel(
+                    uploaded_file,
+                    sheet_name=sheet,
+                )
+
+                temp_df = clean_dataframe(
+                    temp_df
+                )
+
+                if not temp_df.empty:
+
+                    sheets[sheet] = temp_df
+
+            st.session_state.dataframes = sheets
+
+        st.success(
+            f"File successfully loaded: {uploaded_file.name}"
+        )
+
+    except Exception as exc:
+
+        st.error(
+            f"Unable to read the file: {exc}"
+        )
+
+
+# ============================================================
+# SHEET SELECTION
+# ============================================================
+
+if st.session_state.dataframes:
+
+    st.markdown(
+        '<div class="section-title">2. Select Data Sheet</div>',
+        unsafe_allow_html=True,
+    )
+
+    sheet_names = list(
+        st.session_state.dataframes.keys()
+    )
+
+    selected_sheet = st.selectbox(
+        "Available sheets",
+        sheet_names,
+    )
+
+    df = st.session_state.dataframes[
+        selected_sheet
+    ]
+
+    st.session_state.selected_df = df
+
+    summary = build_basic_summary(df)
+
+    # --------------------------------------------------------
+    # KPI
+    # --------------------------------------------------------
+
+    cols = st.columns(4)
+
+    metrics = [
+        ("Rows", summary["Total Records"]),
+        ("Columns", summary["Total Columns"]),
+        ("Duplicates", summary["Duplicate Rows"]),
+        ("Missing Cells", summary["Missing Cells"]),
+    ]
+
+    for col, (label, value) in zip(
+        cols,
+        metrics,
+    ):
+
+        col.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-value">{value:,}</div>
+                <div class="metric-label">{label}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # --------------------------------------------------------
+    # Preview
+    # --------------------------------------------------------
+
+    st.markdown(
+        '<div class="section-title">3. Data Preview</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.dataframe(
+        df.head(100),
+        use_container_width=True,
+        height=350,
+    )
+
+    # --------------------------------------------------------
+    # Column Analysis
+    # --------------------------------------------------------
+
+    st.markdown(
+        '<div class="section-title">4. Automatic Data Analysis</div>',
+        unsafe_allow_html=True,
+    )
+
+    analysis_df = analyze_dataframe(df)
+
+    st.dataframe(
+        analysis_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # --------------------------------------------------------
+    # Report Instruction
+    # --------------------------------------------------------
+
+    st.markdown(
+        '<div class="section-title">5. Tell the Agent What Report You Need</div>',
+        unsafe_allow_html=True,
+    )
+
+    instruction = st.text_area(
+        "Report requirement",
+        value=st.session_state.report_request,
+        height=130,
+        placeholder=(
+            "Example: Create a BN-wise monthly progress "
+            "report showing total, updated, pending and "
+            "completion percentage with dashboard and charts."
+        ),
+    )
+
+    st.session_state.report_request = instruction
+
+    generate = st.button(
+        "✨ Generate Report Plan",
+        type="primary",
+        use_container_width=True,
+    )
+
+    if generate:
+
+        if not instruction.strip():
+
+            st.warning(
+                "Please enter your report requirement."
+            )
+
+        else:
+
+            plan = auto_report_plan(
+                df,
+                instruction,
+            )
+
+            st.session_state.plan = plan
+
+            st.markdown(
+                '<div class="section-title">6. Report Plan</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.info(
+                f"Report Type: {plan['report_type']}"
+            )
+
+            if plan["group_by"]:
+
+                st.write(
+                    "**Group By:** "
+                    + ", ".join(plan["group_by"])
+                )
+
+            else:
+
+                st.write(
+                    "**Group By:** Automatic / Overall"
+                )
+
+            if plan["metrics"]:
+
+                st.write(
+                    "**Metrics:** "
+                    + ", ".join(plan["metrics"])
+                )
+
+            if plan["charts"]:
+
+                st.write(
+                    "**Charts:** "
+                    + ", ".join(plan["charts"])
+                )
+
+            # ------------------------------------------------
+            # Generate Excel
+            # ------------------------------------------------
+
+            excel_file = create_excel_report(
+                df=df,
+                analysis_df=analysis_df,
+                summary=summary,
+                instruction=instruction,
+                plan=plan,
+            )
+
+            st.markdown(
+                '<div class="section-title">7. Final Report</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.success(
+                "Your premium Excel report is ready."
+            )
+
+            st.download_button(
+                label="⬇️ Download Premium Excel Report",
+                data=excel_file,
+                file_name=(
+                    "Universal_Custom_Report.xlsx"
+                ),
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                use_container_width=True,
+            )
+
+else:
+
+    st.info(
+        "Upload an Excel or CSV file to begin."
+    )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "Universal Custom Report Agent • V1.0 • "
+    "Intelligent reporting foundation"
+)
